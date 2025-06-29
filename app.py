@@ -191,6 +191,29 @@ def should_log_scale(min_val, max_val):
     ratio = max_val / min_val
     return np.log10(ratio) > 2
 
+def remove_objective(index):
+    removed_obj = st.session_state.objectives.pop(index)
+    # Remove corresponding columns from samples
+    if not st.session_state.samples.empty and removed_obj['name'] in st.session_state.samples.columns:
+        st.session_state.samples = st.session_state.samples.drop(columns=[removed_obj['name']])
+    # Remove from log scaling settings
+    if removed_obj['name'] in st.session_state.log_scaling_settings['manual_obj_log_scale']:
+        del st.session_state.log_scaling_settings['manual_obj_log_scale'][removed_obj['name']]
+    st.rerun()
+    removed_var = st.session_state.variables.pop(index)
+    # Remove corresponding columns from samples
+    if not st.session_state.samples.empty and removed_var['name'] in st.session_state.samples.columns:
+        st.session_state.samples = st.session_state.samples.drop(columns=[removed_var['name']])
+    # Remove from log scaling settings
+    if removed_var['name'] in st.session_state.log_scaling_settings['manual_var_log_scale']:
+        del st.session_state.log_scaling_settings['manual_var_log_scale'][removed_var['name']]
+    st.rerun()
+    """Determine if log scaling should be applied based on ratio and non-negativity"""
+    if min_val <= 0:
+        return False
+    ratio = max_val / min_val
+    return np.log10(ratio) > 2
+
 def get_log_scaling_for_data(data, name, is_variable=True):
     """Get log scaling setting for a variable or objective"""
     if st.session_state.log_scaling_settings['auto_log_scale']:
