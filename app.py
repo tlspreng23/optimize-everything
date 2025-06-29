@@ -281,6 +281,12 @@ def add_sample(sample_data):
 def optimization_section():
     st.header("🎯 Bayesian Optimization")
     
+    # Show backend info
+    if BOTORCH_AVAILABLE:
+        st.success("✅ Using BoTorch for advanced Bayesian optimization")
+    else:
+        st.warning("⚠️ BoTorch not available. Using scikit-learn Gaussian Process (still very effective!)")
+    
     if st.session_state.samples.empty:
         st.warning("Please add some sample data first!")
         return
@@ -354,6 +360,14 @@ def optimization_section():
                 st.exception(e)
 
 def generate_bayesian_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta=None):
+    """Generate optimization suggestions using BoTorch or scikit-learn fallback"""
+    
+    if BOTORCH_AVAILABLE:
+        return generate_botorch_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta)
+    else:
+        return generate_sklearn_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta)
+
+def generate_botorch_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta=None):
     """Generate optimization suggestions using BoTorch"""
     
     # Prepare data
@@ -411,6 +425,75 @@ def generate_bayesian_suggestions(samples_df, variables, objective_name, num_sug
         suggestions.append(suggestion)
     
     return suggestions
+
+def generate_sklearn_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta=None):
+    """Generate optimization suggestions using scikit-learn Gaussian Process"""
+    
+    # Prepare data
+    var_names = [var['name'] for var in variables]
+    X_raw = samples_df[var_names].values
+    y_raw = samples_df[objective_name].values
+    
+    # Find if we should maximize or minimize
+    obj_info = next(obj for obj in st.session_state.objectives if obj['name'] == objective_name)
+    minimize = obj_info['type'] == 'minimize'
+    
+    # If minimizing, negate the objective
+    if minimize:
+        y_raw = -y_raw
+    
+    # Normalize inputs to [0, 1]
+    X_normalized = np.zeros_like(X_raw)
+    bounds = []
+    for i, var in enumerate(variables):
+        X_normalized[:, i] = (X_raw[:, i] - var['min']) / (var['max'] - var['min'])
+        bounds.append([0, 1])
+    
+    # Create and fit GP model
+    kernel = RBF(length_scale=0.1, length_scale_bounds=(1e-3, 1e3)) + WhiteKernel(noise_level=1e-5)
+    gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-6, normalize_y=True, n_restarts_optimizer=10)
+    gp.fit(X_normalized, y_raw)
+    
+    # Generate candidate points
+    np.random.seed(42)  # For reproducibility
+    n_candidates = 1000
+    candidates = np.random.uniform(0, 1, (n_candidates, len(variables)))
+    
+    # Predict mean and std for candidates
+    mean, std = gp.predict(candidates, return_std=True)
+    
+    # Calculate acquisition function
+    if acq_func == "Expected Improvement":
+        best_f = np.max(y_raw)
+        z = (mean - best_f) / (std + 1e-9)
+        ei = (mean - best_f) * norm_cdf(z) + std * norm_pdf(z)
+        acq_values = ei
+    else:  # Upper Confidence Bound
+        beta = beta or 2.0
+        acq_values = mean + beta * std
+    
+    # Select top suggestions
+    top_indices = np.argsort(acq_values)[-num_suggestions:][::-1]
+    
+    suggestions = []
+    for idx in top_indices:
+        suggestion = {}
+        # Unnormalize candidates
+        for j, var in enumerate(variables):
+            unnormalized_value = candidates[idx, j] * (var['max'] - var['min']) + var['min']
+            suggestion[var['name']] = float(unnormalized_value)
+        suggestion['acquisition_value'] = float(acq_values[idx])
+        suggestions.append(suggestion)
+    
+    return suggestions
+
+def norm_cdf(x):
+    """Standard normal CDF approximation"""
+    return 0.5 * (1 + np.sign(x) * np.sqrt(1 - np.exp(-2 * x**2 / np.pi)))
+
+def norm_pdf(x):
+    """Standard normal PDF"""
+    return np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi)
 
 def format_suggestion(suggestion, variables):
     """Format suggestion for display"""
