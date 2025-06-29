@@ -9,6 +9,7 @@ import io
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel
 import warnings
+import itertools
 warnings.filterwarnings('ignore')
 
 # Try to import BoTorch, fallback to scikit-learn if not available
@@ -71,6 +72,12 @@ if 'samples' not in st.session_state:
     st.session_state.samples = pd.DataFrame()
 if 'optimization_history' not in st.session_state:
     st.session_state.optimization_history = []
+if 'log_scaling_settings' not in st.session_state:
+    st.session_state.log_scaling_settings = {
+        'auto_log_scale': True,
+        'manual_var_log_scale': {},
+        'manual_obj_log_scale': {}
+    }
 
 def main():
     # Header
@@ -91,9 +98,9 @@ def main():
             var_name = st.text_input("Variable name", key="var_name")
             col1, col2 = st.columns(2)
             with col1:
-                var_min = st.number_input("Min value", key="var_min")
+                var_min = st.number_input("Min value", key="var_min", format="%.4f", step=0.0001)
             with col2:
-                var_max = st.number_input("Max value", key="var_max")
+                var_max = st.number_input("Max value", key="var_max", format="%.4f", step=0.0001)
             
             if st.button("Add Variable"):
                 add_variable(var_name, var_min, var_max)
@@ -135,7 +142,7 @@ def main():
         return
     
     # Tabs for different sections
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Data Input", "🎯 Optimization", "📈 Analysis", "💾 Export/Import"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Data Input", "🎯 Optimization", "📈 Analysis", "🗺️ Contour Plots", "💾 Export/Import"])
     
     with tab1:
         data_input_section()
@@ -147,6 +154,9 @@ def main():
         analysis_section()
     
     with tab4:
+        contour_plots_section()
+    
+    with tab5:
         export_import_section()
 
 def add_variable(name, min_val, max_val):
@@ -167,10 +177,42 @@ def add_variable(name, min_val, max_val):
         'min': min_val,
         'max': max_val
     })
+    
+    # Initialize log scaling setting for new variable
+    st.session_state.log_scaling_settings['manual_var_log_scale'][name] = should_log_scale(min_val, max_val)
+    
     st.success(f"Added variable: {name}")
     st.rerun()
 
-def remove_variable(index):
+def should_log_scale(min_val, max_val):
+    """Determine if log scaling should be applied based on ratio and non-negativity"""
+    if min_val <= 0:
+        return False
+    ratio = max_val / min_val
+    return np.log10(ratio) > 2
+
+def get_log_scaling_for_data(data, name, is_variable=True):
+    """Get log scaling setting for a variable or objective"""
+    if st.session_state.log_scaling_settings['auto_log_scale']:
+        min_val, max_val = data.min(), data.max()
+        return should_log_scale(min_val, max_val)
+    else:
+        if is_variable:
+            return st.session_state.log_scaling_settings['manual_var_log_scale'].get(name, False)
+        else:
+            return st.session_state.log_scaling_settings['manual_obj_log_scale'].get(name, False)
+
+def apply_log_scaling(data, should_scale):
+    """Apply log scaling if needed"""
+    if should_scale and (data > 0).all():
+        return np.log10(data)
+    return data
+
+def reverse_log_scaling(data, was_scaled):
+    """Reverse log scaling if it was applied"""
+    if was_scaled:
+        return 10 ** data
+    return data
     removed_var = st.session_state.variables.pop(index)
     # Remove corresponding columns from samples
     if not st.session_state.samples.empty and removed_var['name'] in st.session_state.samples.columns:
@@ -190,6 +232,10 @@ def add_objective(name, obj_type):
         'name': name,
         'type': obj_type
     })
+    
+    # Initialize log scaling setting for new objective
+    st.session_state.log_scaling_settings['manual_obj_log_scale'][name] = False
+    
     st.success(f"Added objective: {name}")
     st.rerun()
 
@@ -220,6 +266,8 @@ def data_input_section():
                     min_value=var['min'], 
                     max_value=var['max'],
                     value=(var['min'] + var['max']) / 2,
+                    format="%.4f",
+                    step=0.0001,
                     key=f"input_{var['name']}"
                 )
                 sample_data[var['name']] = value
@@ -229,6 +277,8 @@ def data_input_section():
             with cols[len(st.session_state.variables) + i]:
                 value = st.number_input(
                     f"{obj['name']}", 
+                    format="%.4f",
+                    step=0.0001,
                     key=f"input_{obj['name']}"
                 )
                 sample_data[obj['name']] = value
@@ -257,16 +307,32 @@ def data_input_section():
     if not st.session_state.samples.empty:
         st.subheader("Current Samples")
         
-        # Add delete functionality
-        col1, col2 = st.columns([4, 1])
+        # Create a dataframe with row indices for deletion
+        display_df = st.session_state.samples.copy()
+        display_df.index.name = 'Index'
+        
+        # Show samples with delete buttons
+        for idx in display_df.index:
+            col1, col2 = st.columns([6, 1])
+            with col1:
+                # Display row data
+                row_data = []
+                for col in display_df.columns:
+                    row_data.append(f"{col}: {display_df.loc[idx, col]:.4f}")
+                st.write(f"**Sample {idx}:** " + " | ".join(row_data))
+            with col2:
+                if st.button("🗑️", key=f"delete_sample_{idx}", help="Delete this sample"):
+                    st.session_state.samples = st.session_state.samples.drop(idx).reset_index(drop=True)
+                    st.rerun()
+        
+        # Summary and clear all button
+        col1, col2 = st.columns([3, 1])
         with col1:
-            st.dataframe(st.session_state.samples, use_container_width=True)
+            st.info(f"Total samples: {len(st.session_state.samples)}")
         with col2:
             if st.button("Clear All Samples"):
                 st.session_state.samples = pd.DataFrame()
                 st.rerun()
-        
-        st.info(f"Total samples: {len(st.session_state.samples)}")
     else:
         st.info("No samples added yet. Add some data to get started with optimization!")
 
@@ -310,6 +376,29 @@ def optimization_section():
         else:
             beta = None
     
+    # Advanced settings
+    with st.expander("⚙️ Advanced Settings"):
+        st.subheader("Log Scaling Options")
+        
+        auto_log_scale = st.checkbox(
+            "Auto log-scale variables/objectives (when ratio > 100 and values > 0)",
+            value=st.session_state.log_scaling_settings['auto_log_scale']
+        )
+        st.session_state.log_scaling_settings['auto_log_scale'] = auto_log_scale
+        
+        if not auto_log_scale:
+            st.write("**Manual Variable Log Scaling:**")
+            for var in st.session_state.variables:
+                current_setting = st.session_state.log_scaling_settings['manual_var_log_scale'].get(var['name'], False)
+                new_setting = st.checkbox(f"Log-scale {var['name']}", value=current_setting, key=f"log_var_{var['name']}")
+                st.session_state.log_scaling_settings['manual_var_log_scale'][var['name']] = new_setting
+            
+            st.write("**Manual Objective Log Scaling:**")
+            for obj in st.session_state.objectives:
+                current_setting = st.session_state.log_scaling_settings['manual_obj_log_scale'].get(obj['name'], False)
+                new_setting = st.checkbox(f"Log-scale {obj['name']}", value=current_setting, key=f"log_obj_{obj['name']}")
+                st.session_state.log_scaling_settings['manual_obj_log_scale'][obj['name']] = new_setting
+    
     # Objective selection for optimization (if multiple objectives)
     if len(st.session_state.objectives) > 1:
         selected_objective = st.selectbox(
@@ -323,6 +412,10 @@ def optimization_section():
     if st.button("🚀 Generate Optimization Suggestions", type="primary"):
         with st.spinner("Running Bayesian optimization..."):
             try:
+                # Show log scaling info
+                if st.session_state.log_scaling_settings['auto_log_scale']:
+                    st.info("ℹ️ Auto log-scaling enabled for variables/objectives with ratio > 100")
+                
                 suggestions = generate_bayesian_suggestions(
                     st.session_state.samples,
                     st.session_state.variables,
@@ -352,7 +445,8 @@ def optimization_section():
                     'timestamp': pd.Timestamp.now(),
                     'objective': selected_objective,
                     'suggestions': suggestions,
-                    'num_samples': len(st.session_state.samples)
+                    'num_samples': len(st.session_state.samples),
+                    'backend': st.session_state.optimization_backend
                 })
                 
             except Exception as e:
@@ -368,12 +462,25 @@ def generate_bayesian_suggestions(samples_df, variables, objective_name, num_sug
         return generate_sklearn_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta)
 
 def generate_botorch_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta=None):
-    """Generate optimization suggestions using BoTorch"""
+    """Generate optimization suggestions using BoTorch with log scaling"""
     
-    # Prepare data
+    # Prepare data with log scaling
     var_names = [var['name'] for var in variables]
-    X_raw = samples_df[var_names].values
-    y_raw = samples_df[objective_name].values.reshape(-1, 1)
+    X_raw = samples_df[var_names].values.copy()
+    y_raw = samples_df[objective_name].values.reshape(-1, 1).copy()
+    
+    # Apply log scaling to variables
+    var_log_scaled = []
+    for i, var in enumerate(variables):
+        should_scale = get_log_scaling_for_data(samples_df[var['name']], var['name'], is_variable=True)
+        var_log_scaled.append(should_scale)
+        if should_scale:
+            X_raw[:, i] = apply_log_scaling(X_raw[:, i], True)
+    
+    # Apply log scaling to objective
+    obj_should_scale = get_log_scaling_for_data(samples_df[objective_name], objective_name, is_variable=False)
+    if obj_should_scale:
+        y_raw = apply_log_scaling(y_raw.flatten(), True).reshape(-1, 1)
     
     # Find if we should maximize or minimize
     obj_info = next(obj for obj in st.session_state.objectives if obj['name'] == objective_name)
@@ -387,9 +494,18 @@ def generate_botorch_suggestions(samples_df, variables, objective_name, num_sugg
     X = torch.tensor(X_raw, dtype=torch.float64)
     y = torch.tensor(y_raw, dtype=torch.float64)
     
-    # Normalize inputs to [0, 1]
-    bounds = torch.tensor([[var['min'] for var in variables], 
-                          [var['max'] for var in variables]], dtype=torch.float64)
+    # Create bounds for normalization (considering log scaling)
+    torch_bounds = []
+    for i, var in enumerate(variables):
+        if var_log_scaled[i]:
+            min_val = np.log10(max(var['min'], 1e-10))
+            max_val = np.log10(var['max'])
+        else:
+            min_val = var['min']
+            max_val = var['max']
+        torch_bounds.append([min_val, max_val])
+    
+    bounds = torch.tensor(torch_bounds, dtype=torch.float64).T
     X_normalized = normalize(X, bounds)
     
     # Create and fit GP model
@@ -420,19 +536,36 @@ def generate_botorch_suggestions(samples_df, variables, objective_name, num_sugg
     for i in range(num_suggestions):
         suggestion = {}
         for j, var in enumerate(variables):
-            suggestion[var['name']] = float(candidates_unnormalized[i, j].item())
+            value = float(candidates_unnormalized[i, j].item())
+            # Reverse log scaling if applied
+            if var_log_scaled[j]:
+                value = 10 ** value
+            suggestion[var['name']] = value
         suggestion['acquisition_value'] = float(acq_values[i].item())
         suggestions.append(suggestion)
     
     return suggestions
 
 def generate_sklearn_suggestions(samples_df, variables, objective_name, num_suggestions, acq_func, beta=None):
-    """Generate optimization suggestions using scikit-learn Gaussian Process"""
+    """Generate optimization suggestions using scikit-learn Gaussian Process with log scaling"""
     
-    # Prepare data
+    # Prepare data with log scaling
     var_names = [var['name'] for var in variables]
-    X_raw = samples_df[var_names].values
-    y_raw = samples_df[objective_name].values
+    X_raw = samples_df[var_names].values.copy()
+    y_raw = samples_df[objective_name].values.copy()
+    
+    # Apply log scaling to variables
+    var_log_scaled = []
+    for i, var in enumerate(variables):
+        should_scale = get_log_scaling_for_data(samples_df[var['name']], var['name'], is_variable=True)
+        var_log_scaled.append(should_scale)
+        if should_scale:
+            X_raw[:, i] = apply_log_scaling(X_raw[:, i], True)
+    
+    # Apply log scaling to objective
+    obj_should_scale = get_log_scaling_for_data(samples_df[objective_name], objective_name, is_variable=False)
+    if obj_should_scale:
+        y_raw = apply_log_scaling(y_raw, True)
     
     # Find if we should maximize or minimize
     obj_info = next(obj for obj in st.session_state.objectives if obj['name'] == objective_name)
@@ -446,11 +579,62 @@ def generate_sklearn_suggestions(samples_df, variables, objective_name, num_sugg
     X_normalized = np.zeros_like(X_raw)
     bounds = []
     for i, var in enumerate(variables):
-        X_normalized[:, i] = (X_raw[:, i] - var['min']) / (var['max'] - var['min'])
+        if var_log_scaled[i]:
+            # Use log-scaled bounds
+            min_val = np.log10(max(var['min'], 1e-10))
+            max_val = np.log10(var['max'])
+        else:
+            min_val = var['min']
+            max_val = var['max']
+        
+        X_normalized[:, i] = (X_raw[:, i] - min_val) / (max_val - min_val)
         bounds.append([0, 1])
     
     # Create and fit GP model
     kernel = RBF(length_scale=0.1, length_scale_bounds=(1e-3, 1e3)) + WhiteKernel(noise_level=1e-5)
+    gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-6, normalize_y=True, n_restarts_optimizer=10)
+    gp.fit(X_normalized, y_raw)
+    
+    # Generate candidate points
+    np.random.seed(42)  # For reproducibility
+    n_candidates = 1000
+    candidates = np.random.uniform(0, 1, (n_candidates, len(variables)))
+    
+    # Predict mean and std for candidates
+    mean, std = gp.predict(candidates, return_std=True)
+    
+    # Calculate acquisition function
+    if acq_func == "Expected Improvement":
+        best_f = np.max(y_raw)
+        z = (mean - best_f) / (std + 1e-9)
+        ei = (mean - best_f) * norm_cdf(z) + std * norm_pdf(z)
+        acq_values = ei
+    else:  # Upper Confidence Bound
+        beta = beta or 2.0
+        acq_values = mean + beta * std
+    
+    # Select top suggestions
+    top_indices = np.argsort(acq_values)[-num_suggestions:][::-1]
+    
+    suggestions = []
+    for idx in top_indices:
+        suggestion = {}
+        # Unnormalize candidates
+        for j, var in enumerate(variables):
+            if var_log_scaled[j]:
+                # Reverse log scaling
+                min_val = np.log10(max(var['min'], 1e-10))
+                max_val = np.log10(var['max'])
+                unnormalized_log_value = candidates[idx, j] * (max_val - min_val) + min_val
+                unnormalized_value = 10 ** unnormalized_log_value
+            else:
+                unnormalized_value = candidates[idx, j] * (var['max'] - var['min']) + var['min']
+            
+            suggestion[var['name']] = float(unnormalized_value)
+        suggestion['acquisition_value'] = float(acq_values[idx])
+        suggestions.append(suggestion)
+    
+    return suggestions-5)
     gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-6, normalize_y=True, n_restarts_optimizer=10)
     gp.fit(X_normalized, y_raw)
     
@@ -496,11 +680,11 @@ def norm_pdf(x):
     return np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi)
 
 def format_suggestion(suggestion, variables):
-    """Format suggestion for display"""
+    """Format suggestion for display with 4 decimal places"""
     var_strings = []
     for var in variables:
         value = suggestion[var['name']]
-        var_strings.append(f"<strong>{var['name']}:</strong> {value:.3f}")
+        var_strings.append(f"<strong>{var['name']}:</strong> {value:.4f}")
     return ", ".join(var_strings)
 
 def analysis_section():
@@ -567,7 +751,109 @@ def analysis_section():
         ])
         st.dataframe(history_df, use_container_width=True)
 
-def export_import_section():
+def contour_plots_section():
+    st.header("🗺️ Contour Plots")
+    
+    if st.session_state.samples.empty:
+        st.info("Add some sample data to see contour plots!")
+        return
+    
+    if len(st.session_state.variables) < 2:
+        st.info("Need at least 2 variables to create contour plots!")
+        return
+    
+    if len(st.session_state.objectives) == 0:
+        st.info("Need at least 1 objective to create contour plots!")
+        return
+    
+    # Get all variable combinations
+    var_combinations = list(itertools.combinations(st.session_state.variables, 2))
+    
+    if len(var_combinations) == 0:
+        st.info("Need at least 2 variables for contour plots!")
+        return
+    
+    # Select objective for contour plotting
+    selected_objective = st.selectbox(
+        "Select objective for contour plots:",
+        [obj['name'] for obj in st.session_state.objectives]
+    )
+    
+    # Create contour plots for each variable combination
+    n_plots = len(var_combinations)
+    n_cols = min(2, n_plots)
+    n_rows = (n_plots + n_cols - 1) // n_cols
+    
+    for i, (var1, var2) in enumerate(var_combinations):
+        if i % n_cols == 0:
+            cols = st.columns(n_cols)
+        
+        with cols[i % n_cols]:
+            fig = create_contour_plot(
+                st.session_state.samples,
+                var1['name'], var2['name'], selected_objective
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+def create_contour_plot(samples_df, var1_name, var2_name, obj_name):
+    """Create a contour plot for two variables and one objective"""
+    
+    # Get data
+    x = samples_df[var1_name].values
+    y = samples_df[var2_name].values
+    z = samples_df[obj_name].values
+    
+    # Create interpolation grid
+    x_range = np.linspace(x.min(), x.max(), 50)
+    y_range = np.linspace(y.min(), y.max(), 50)
+    X_grid, Y_grid = np.meshgrid(x_range, y_range)
+    
+    # Interpolate values for contour
+    from scipy.interpolate import griddata
+    Z_grid = griddata((x, y), z, (X_grid, Y_grid), method='cubic', fill_value=z.mean())
+    
+    # Create contour plot
+    fig = go.Figure()
+    
+    # Add contour
+    fig.add_trace(go.Contour(
+        x=x_range,
+        y=y_range,
+        z=Z_grid,
+        colorscale='Viridis',
+        name=obj_name,
+        contours=dict(
+            showlabels=True,
+            labelfont=dict(size=10, color='white')
+        ),
+        colorbar=dict(title=obj_name)
+    ))
+    
+    # Add sample points
+    fig.add_trace(go.Scatter(
+        x=x,
+        y=y,
+        mode='markers',
+        marker=dict(
+            size=8,
+            color=z,
+            colorscale='Viridis',
+            line=dict(width=2, color='white'),
+            showscale=False
+        ),
+        text=[f"{obj_name}: {val:.3f}" for val in z],
+        hovertemplate=f"{var1_name}: %{{x:.3f}}<br>{var2_name}: %{{y:.3f}}<br>%{{text}}<extra></extra>",
+        name="Samples"
+    ))
+    
+    fig.update_layout(
+        title=f"{obj_name} vs {var1_name} & {var2_name}",
+        xaxis_title=var1_name,
+        yaxis_title=var2_name,
+        height=400
+    )
+    
+    return fig
     st.header("💾 Export & Import")
     
     # Export section
