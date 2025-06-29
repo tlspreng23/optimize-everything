@@ -317,7 +317,7 @@ def export_import_section():
             st.error(f"Error loading configuration: {str(e)}")
 
 if __name__ == "__main__":
-    main() Header
+    main() # Header
     st.markdown(f"""
     <div class="main-header">
         <h1>🎯 Optimize Everything</h1>
