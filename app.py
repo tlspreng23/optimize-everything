@@ -4,15 +4,27 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import torch
-from botorch.models import SingleTaskGP
-from botorch.fit import fit_gpytorch_model
-from botorch.acquisition import UpperConfidenceBound, ExpectedImprovement
-from botorch.optim import optimize_acqf
-from gpytorch.mlls import ExactMarginalLogLikelihood
-from botorch.utils.transforms import normalize, unnormalize
 import json
 import io
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+import warnings
+warnings.filterwarnings('ignore')
+
+# Try to import BoTorch, fallback to scikit-learn if not available
+try:
+    import torch
+    from botorch.models import SingleTaskGP
+    from botorch.fit import fit_gpytorch_model
+    from botorch.acquisition import UpperConfidenceBound, ExpectedImprovement
+    from botorch.optim import optimize_acqf
+    from gpytorch.mlls import ExactMarginalLogLikelihood
+    from botorch.utils.transforms import normalize, unnormalize
+    BOTORCH_AVAILABLE = True
+    st.session_state.optimization_backend = "BoTorch"
+except ImportError:
+    BOTORCH_AVAILABLE = False
+    st.session_state.optimization_backend = "Scikit-learn"
 
 # Page config
 st.set_page_config(
@@ -62,10 +74,10 @@ if 'optimization_history' not in st.session_state:
 
 def main():
     # Header
-    st.markdown("""
+    st.markdown(f"""
     <div class="main-header">
         <h1>🎯 Optimize Everything</h1>
-        <p>Multi-variable Bayesian optimization with BoTorch</p>
+        <p>Multi-variable Bayesian optimization powered by {st.session_state.optimization_backend}</p>
     </div>
     """, unsafe_allow_html=True)
     
