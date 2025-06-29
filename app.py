@@ -79,8 +79,245 @@ if 'log_scaling_settings' not in st.session_state:
         'manual_obj_log_scale': {}
     }
 
+def should_log_scale(min_val, max_val):
+    """Determine if log scaling should be applied based on ratio and non-negativity"""
+    if min_val <= 0:
+        return False
+    ratio = max_val / min_val
+    return np.log10(ratio) > 2
+
+def get_log_scaling_for_data(data, name, is_variable=True):
+    """Get log scaling setting for a variable or objective"""
+    if st.session_state.log_scaling_settings['auto_log_scale']:
+        min_val, max_val = data.min(), data.max()
+        return should_log_scale(min_val, max_val)
+    else:
+        if is_variable:
+            return st.session_state.log_scaling_settings['manual_var_log_scale'].get(name, False)
+        else:
+            return st.session_state.log_scaling_settings['manual_obj_log_scale'].get(name, False)
+
+def apply_log_scaling(data, should_scale):
+    """Apply log scaling if needed"""
+    if should_scale and (data > 0).all():
+        return np.log10(data)
+    return data
+
+def reverse_log_scaling(data, was_scaled):
+    """Reverse log scaling if it was applied"""
+    if was_scaled:
+        return 10 ** data
+    return data
+
+def norm_cdf(x):
+    """Standard normal CDF approximation"""
+    return 0.5 * (1 + np.sign(x) * np.sqrt(1 - np.exp(-2 * x**2 / np.pi)))
+
+def norm_pdf(x):
+    """Standard normal PDF"""
+    return np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi)
+
 def main():
-    # Header
+    # Objective trends
+    if len(st.session_state.objectives) > 0:
+        st.subheader("📈 Objective Trends")
+        obj_cols = st.columns(len(st.session_state.objectives))
+        
+        for i, obj in enumerate(st.session_state.objectives):
+            with obj_cols[i]:
+                fig = px.line(y=st.session_state.samples[obj['name']], 
+                             title=f"{obj['name']} Over Time",
+                             labels={'index': 'Experiment #', 'y': obj['name']})
+                fig.add_scatter(y=st.session_state.samples[obj['name']], mode='markers')
+                st.plotly_chart(fig, use_container_width=True)
+    
+    # Optimization history
+    if st.session_state.optimization_history:
+        st.subheader("🕒 Optimization History")
+        history_df = pd.DataFrame([
+            {
+                'Timestamp': hist['timestamp'],
+                'Objective': hist['objective'],
+                'Samples Used': hist['num_samples'],
+                'Suggestions Generated': len(hist['suggestions']),
+                'Backend': hist.get('backend', 'Unknown')
+            }
+            for hist in st.session_state.optimization_history
+        ])
+        st.dataframe(history_df, use_container_width=True)
+
+def contour_plots_section():
+    st.header("🗺️ Contour Plots")
+    
+    if st.session_state.samples.empty:
+        st.info("Add some sample data to see contour plots!")
+        return
+    
+    if len(st.session_state.variables) < 2:
+        st.info("Need at least 2 variables to create contour plots!")
+        return
+    
+    if len(st.session_state.objectives) == 0:
+        st.info("Need at least 1 objective to create contour plots!")
+        return
+    
+    # Get all variable combinations
+    var_combinations = list(itertools.combinations(st.session_state.variables, 2))
+    
+    if len(var_combinations) == 0:
+        st.info("Need at least 2 variables for contour plots!")
+        return
+    
+    # Select objective for contour plotting
+    selected_objective = st.selectbox(
+        "Select objective for contour plots:",
+        [obj['name'] for obj in st.session_state.objectives]
+    )
+    
+    # Create contour plots for each variable combination
+    n_plots = len(var_combinations)
+    n_cols = min(2, n_plots)
+    n_rows = (n_plots + n_cols - 1) // n_cols
+    
+    for i, (var1, var2) in enumerate(var_combinations):
+        if i % n_cols == 0:
+            cols = st.columns(n_cols)
+        
+        with cols[i % n_cols]:
+            fig = create_contour_plot(
+                st.session_state.samples,
+                var1['name'], var2['name'], selected_objective
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+def create_contour_plot(samples_df, var1_name, var2_name, obj_name):
+    """Create a contour plot for two variables and one objective"""
+    
+    # Get data
+    x = samples_df[var1_name].values
+    y = samples_df[var2_name].values
+    z = samples_df[obj_name].values
+    
+    # Create interpolation grid
+    x_range = np.linspace(x.min(), x.max(), 50)
+    y_range = np.linspace(y.min(), y.max(), 50)
+    X_grid, Y_grid = np.meshgrid(x_range, y_range)
+    
+    # Interpolate values for contour
+    from scipy.interpolate import griddata
+    Z_grid = griddata((x, y), z, (X_grid, Y_grid), method='cubic', fill_value=z.mean())
+    
+    # Create contour plot
+    fig = go.Figure()
+    
+    # Add contour
+    fig.add_trace(go.Contour(
+        x=x_range,
+        y=y_range,
+        z=Z_grid,
+        colorscale='Viridis',
+        name=obj_name,
+        contours=dict(
+            showlabels=True,
+            labelfont=dict(size=10, color='white')
+        ),
+        colorbar=dict(title=obj_name)
+    ))
+    
+    # Add sample points
+    fig.add_trace(go.Scatter(
+        x=x,
+        y=y,
+        mode='markers',
+        marker=dict(
+            size=8,
+            color=z,
+            colorscale='Viridis',
+            line=dict(width=2, color='white'),
+            showscale=False
+        ),
+        text=[f"{obj_name}: {val:.3f}" for val in z],
+        hovertemplate=f"{var1_name}: %{{x:.3f}}<br>{var2_name}: %{{y:.3f}}<br>%{{text}}<extra></extra>",
+        name="Samples"
+    ))
+    
+    fig.update_layout(
+        title=f"{obj_name} vs {var1_name} & {var2_name}",
+        xaxis_title=var1_name,
+        yaxis_title=var2_name,
+        height=400
+    )
+    
+    return fig
+
+def export_import_section():
+    st.header("💾 Export & Import")
+    
+    # Export section
+    st.subheader("📤 Export Data")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if not st.session_state.samples.empty:
+            csv_data = st.session_state.samples.to_csv(index=False)
+            st.download_button(
+                label="Download Samples as CSV",
+                data=csv_data,
+                file_name="optimization_samples.csv",
+                mime="text/csv"
+            )
+    
+    with col2:
+        # Export complete configuration
+        config_data = {
+            'variables': st.session_state.variables,
+            'objectives': st.session_state.objectives,
+            'samples': st.session_state.samples.to_dict('records') if not st.session_state.samples.empty else [],
+            'history': st.session_state.optimization_history,
+            'log_scaling_settings': st.session_state.log_scaling_settings
+        }
+        
+        config_json = json.dumps(config_data, indent=2, default=str)
+        st.download_button(
+            label="Download Complete Configuration",
+            data=config_json,
+            file_name="optimization_config.json",
+            mime="application/json"
+        )
+    
+    # Import section
+    st.subheader("📥 Import Configuration")
+    
+    uploaded_config = st.file_uploader("Upload Configuration JSON", type="json")
+    if uploaded_config is not None:
+        try:
+            config_data = json.load(uploaded_config)
+            
+            if st.button("Load Configuration"):
+                st.session_state.variables = config_data.get('variables', [])
+                st.session_state.objectives = config_data.get('objectives', [])
+                
+                if config_data.get('samples'):
+                    st.session_state.samples = pd.DataFrame(config_data['samples'])
+                else:
+                    st.session_state.samples = pd.DataFrame()
+                
+                st.session_state.optimization_history = config_data.get('history', [])
+                st.session_state.log_scaling_settings = config_data.get('log_scaling_settings', {
+                    'auto_log_scale': True,
+                    'manual_var_log_scale': {},
+                    'manual_obj_log_scale': {}
+                })
+                
+                st.success("Configuration loaded successfully!")
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"Error loading configuration: {str(e)}")
+
+if __name__ == "__main__":
+    main() Header
     st.markdown(f"""
     <div class="main-header">
         <h1>🎯 Optimize Everything</h1>
@@ -184,22 +421,7 @@ def add_variable(name, min_val, max_val):
     st.success(f"Added variable: {name}")
     st.rerun()
 
-def should_log_scale(min_val, max_val):
-    """Determine if log scaling should be applied based on ratio and non-negativity"""
-    if min_val <= 0:
-        return False
-    ratio = max_val / min_val
-    return np.log10(ratio) > 2
-
-def remove_objective(index):
-    removed_obj = st.session_state.objectives.pop(index)
-    # Remove corresponding columns from samples
-    if not st.session_state.samples.empty and removed_obj['name'] in st.session_state.samples.columns:
-        st.session_state.samples = st.session_state.samples.drop(columns=[removed_obj['name']])
-    # Remove from log scaling settings
-    if removed_obj['name'] in st.session_state.log_scaling_settings['manual_obj_log_scale']:
-        del st.session_state.log_scaling_settings['manual_obj_log_scale'][removed_obj['name']]
-    st.rerun()
+def remove_variable(index):
     removed_var = st.session_state.variables.pop(index)
     # Remove corresponding columns from samples
     if not st.session_state.samples.empty and removed_var['name'] in st.session_state.samples.columns:
@@ -207,39 +429,6 @@ def remove_objective(index):
     # Remove from log scaling settings
     if removed_var['name'] in st.session_state.log_scaling_settings['manual_var_log_scale']:
         del st.session_state.log_scaling_settings['manual_var_log_scale'][removed_var['name']]
-    st.rerun()
-    """Determine if log scaling should be applied based on ratio and non-negativity"""
-    if min_val <= 0:
-        return False
-    ratio = max_val / min_val
-    return np.log10(ratio) > 2
-
-def get_log_scaling_for_data(data, name, is_variable=True):
-    """Get log scaling setting for a variable or objective"""
-    if st.session_state.log_scaling_settings['auto_log_scale']:
-        min_val, max_val = data.min(), data.max()
-        return should_log_scale(min_val, max_val)
-    else:
-        if is_variable:
-            return st.session_state.log_scaling_settings['manual_var_log_scale'].get(name, False)
-        else:
-            return st.session_state.log_scaling_settings['manual_obj_log_scale'].get(name, False)
-
-def apply_log_scaling(data, should_scale):
-    """Apply log scaling if needed"""
-    if should_scale and (data > 0).all():
-        return np.log10(data)
-    return data
-
-def reverse_log_scaling(data, was_scaled):
-    """Reverse log scaling if it was applied"""
-    if was_scaled:
-        return 10 ** data
-    return data
-    removed_var = st.session_state.variables.pop(index)
-    # Remove corresponding columns from samples
-    if not st.session_state.samples.empty and removed_var['name'] in st.session_state.samples.columns:
-        st.session_state.samples = st.session_state.samples.drop(columns=[removed_var['name']])
     st.rerun()
 
 def add_objective(name, obj_type):
@@ -267,6 +456,9 @@ def remove_objective(index):
     # Remove corresponding columns from samples
     if not st.session_state.samples.empty and removed_obj['name'] in st.session_state.samples.columns:
         st.session_state.samples = st.session_state.samples.drop(columns=[removed_obj['name']])
+    # Remove from log scaling settings
+    if removed_obj['name'] in st.session_state.log_scaling_settings['manual_obj_log_scale']:
+        del st.session_state.log_scaling_settings['manual_obj_log_scale'][removed_obj['name']]
     st.rerun()
 
 def data_input_section():
@@ -657,50 +849,7 @@ def generate_sklearn_suggestions(samples_df, variables, objective_name, num_sugg
         suggestion['acquisition_value'] = float(acq_values[idx])
         suggestions.append(suggestion)
     
-    return suggestions-5)
-    gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-6, normalize_y=True, n_restarts_optimizer=10)
-    gp.fit(X_normalized, y_raw)
-    
-    # Generate candidate points
-    np.random.seed(42)  # For reproducibility
-    n_candidates = 1000
-    candidates = np.random.uniform(0, 1, (n_candidates, len(variables)))
-    
-    # Predict mean and std for candidates
-    mean, std = gp.predict(candidates, return_std=True)
-    
-    # Calculate acquisition function
-    if acq_func == "Expected Improvement":
-        best_f = np.max(y_raw)
-        z = (mean - best_f) / (std + 1e-9)
-        ei = (mean - best_f) * norm_cdf(z) + std * norm_pdf(z)
-        acq_values = ei
-    else:  # Upper Confidence Bound
-        beta = beta or 2.0
-        acq_values = mean + beta * std
-    
-    # Select top suggestions
-    top_indices = np.argsort(acq_values)[-num_suggestions:][::-1]
-    
-    suggestions = []
-    for idx in top_indices:
-        suggestion = {}
-        # Unnormalize candidates
-        for j, var in enumerate(variables):
-            unnormalized_value = candidates[idx, j] * (var['max'] - var['min']) + var['min']
-            suggestion[var['name']] = float(unnormalized_value)
-        suggestion['acquisition_value'] = float(acq_values[idx])
-        suggestions.append(suggestion)
-    
     return suggestions
-
-def norm_cdf(x):
-    """Standard normal CDF approximation"""
-    return 0.5 * (1 + np.sign(x) * np.sqrt(1 - np.exp(-2 * x**2 / np.pi)))
-
-def norm_pdf(x):
-    """Standard normal PDF"""
-    return np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi)
 
 def format_suggestion(suggestion, variables):
     """Format suggestion for display with 4 decimal places"""
@@ -747,194 +896,4 @@ def analysis_section():
         
         st.plotly_chart(fig, use_container_width=True)
     
-    # Objective trends
-    if len(st.session_state.objectives) > 0:
-        st.subheader("📈 Objective Trends")
-        obj_cols = st.columns(len(st.session_state.objectives))
-        
-        for i, obj in enumerate(st.session_state.objectives):
-            with obj_cols[i]:
-                fig = px.line(y=st.session_state.samples[obj['name']], 
-                             title=f"{obj['name']} Over Time",
-                             labels={'index': 'Experiment #', 'y': obj['name']})
-                fig.add_scatter(y=st.session_state.samples[obj['name']], mode='markers')
-                st.plotly_chart(fig, use_container_width=True)
-    
-    # Optimization history
-    if st.session_state.optimization_history:
-        st.subheader("🕒 Optimization History")
-        history_df = pd.DataFrame([
-            {
-                'Timestamp': hist['timestamp'],
-                'Objective': hist['objective'],
-                'Samples Used': hist['num_samples'],
-                'Suggestions Generated': len(hist['suggestions'])
-            }
-            for hist in st.session_state.optimization_history
-        ])
-        st.dataframe(history_df, use_container_width=True)
-
-def contour_plots_section():
-    st.header("🗺️ Contour Plots")
-    
-    if st.session_state.samples.empty:
-        st.info("Add some sample data to see contour plots!")
-        return
-    
-    if len(st.session_state.variables) < 2:
-        st.info("Need at least 2 variables to create contour plots!")
-        return
-    
-    if len(st.session_state.objectives) == 0:
-        st.info("Need at least 1 objective to create contour plots!")
-        return
-    
-    # Get all variable combinations
-    var_combinations = list(itertools.combinations(st.session_state.variables, 2))
-    
-    if len(var_combinations) == 0:
-        st.info("Need at least 2 variables for contour plots!")
-        return
-    
-    # Select objective for contour plotting
-    selected_objective = st.selectbox(
-        "Select objective for contour plots:",
-        [obj['name'] for obj in st.session_state.objectives]
-    )
-    
-    # Create contour plots for each variable combination
-    n_plots = len(var_combinations)
-    n_cols = min(2, n_plots)
-    n_rows = (n_plots + n_cols - 1) // n_cols
-    
-    for i, (var1, var2) in enumerate(var_combinations):
-        if i % n_cols == 0:
-            cols = st.columns(n_cols)
-        
-        with cols[i % n_cols]:
-            fig = create_contour_plot(
-                st.session_state.samples,
-                var1['name'], var2['name'], selected_objective
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-def create_contour_plot(samples_df, var1_name, var2_name, obj_name):
-    """Create a contour plot for two variables and one objective"""
-    
-    # Get data
-    x = samples_df[var1_name].values
-    y = samples_df[var2_name].values
-    z = samples_df[obj_name].values
-    
-    # Create interpolation grid
-    x_range = np.linspace(x.min(), x.max(), 50)
-    y_range = np.linspace(y.min(), y.max(), 50)
-    X_grid, Y_grid = np.meshgrid(x_range, y_range)
-    
-    # Interpolate values for contour
-    from scipy.interpolate import griddata
-    Z_grid = griddata((x, y), z, (X_grid, Y_grid), method='cubic', fill_value=z.mean())
-    
-    # Create contour plot
-    fig = go.Figure()
-    
-    # Add contour
-    fig.add_trace(go.Contour(
-        x=x_range,
-        y=y_range,
-        z=Z_grid,
-        colorscale='Viridis',
-        name=obj_name,
-        contours=dict(
-            showlabels=True,
-            labelfont=dict(size=10, color='white')
-        ),
-        colorbar=dict(title=obj_name)
-    ))
-    
-    # Add sample points
-    fig.add_trace(go.Scatter(
-        x=x,
-        y=y,
-        mode='markers',
-        marker=dict(
-            size=8,
-            color=z,
-            colorscale='Viridis',
-            line=dict(width=2, color='white'),
-            showscale=False
-        ),
-        text=[f"{obj_name}: {val:.3f}" for val in z],
-        hovertemplate=f"{var1_name}: %{{x:.3f}}<br>{var2_name}: %{{y:.3f}}<br>%{{text}}<extra></extra>",
-        name="Samples"
-    ))
-    
-    fig.update_layout(
-        title=f"{obj_name} vs {var1_name} & {var2_name}",
-        xaxis_title=var1_name,
-        yaxis_title=var2_name,
-        height=400
-    )
-    
-    return fig
-    st.header("💾 Export & Import")
-    
-    # Export section
-    st.subheader("📤 Export Data")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if not st.session_state.samples.empty:
-            csv_data = st.session_state.samples.to_csv(index=False)
-            st.download_button(
-                label="Download Samples as CSV",
-                data=csv_data,
-                file_name="optimization_samples.csv",
-                mime="text/csv"
-            )
-    
-    with col2:
-        # Export complete configuration
-        config_data = {
-            'variables': st.session_state.variables,
-            'objectives': st.session_state.objectives,
-            'samples': st.session_state.samples.to_dict('records') if not st.session_state.samples.empty else [],
-            'history': st.session_state.optimization_history
-        }
-        
-        config_json = json.dumps(config_data, indent=2, default=str)
-        st.download_button(
-            label="Download Complete Configuration",
-            data=config_json,
-            file_name="optimization_config.json",
-            mime="application/json"
-        )
-    
-    # Import section
-    st.subheader("📥 Import Configuration")
-    
-    uploaded_config = st.file_uploader("Upload Configuration JSON", type="json")
-    if uploaded_config is not None:
-        try:
-            config_data = json.load(uploaded_config)
-            
-            if st.button("Load Configuration"):
-                st.session_state.variables = config_data.get('variables', [])
-                st.session_state.objectives = config_data.get('objectives', [])
-                
-                if config_data.get('samples'):
-                    st.session_state.samples = pd.DataFrame(config_data['samples'])
-                else:
-                    st.session_state.samples = pd.DataFrame()
-                
-                st.session_state.optimization_history = config_data.get('history', [])
-                
-                st.success("Configuration loaded successfully!")
-                st.rerun()
-                
-        except Exception as e:
-            st.error(f"Error loading configuration: {str(e)}")
-
-if __name__ == "__main__":
-    main()
+    #
