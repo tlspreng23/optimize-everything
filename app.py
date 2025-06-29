@@ -680,17 +680,18 @@ def analysis_section():
         st.plotly_chart(fig, use_container_width=True)
     
     # Objective trends
-    if len(st.session_state.objectives) > 0:
+    if len(st.session_state.objectives) > 0 and len(st.session_state.samples) > 0:
         st.subheader("📈 Objective Trends")
         obj_cols = st.columns(len(st.session_state.objectives))
         
         for i, obj in enumerate(st.session_state.objectives):
             with obj_cols[i]:
-                fig = px.line(y=st.session_state.samples[obj['name']], 
-                             title=f"{obj['name']} Over Time",
-                             labels={'index': 'Experiment #', 'y': obj['name']})
-                fig.add_scatter(y=st.session_state.samples[obj['name']], mode='markers')
-                st.plotly_chart(fig, use_container_width=True)
+                if obj['name'] in st.session_state.samples.columns:
+                    fig = px.line(y=st.session_state.samples[obj['name']], 
+                                 title=f"{obj['name']} Over Time",
+                                 labels={'index': 'Experiment #', 'y': obj['name']})
+                    fig.add_scatter(y=st.session_state.samples[obj['name']], mode='markers')
+                    st.plotly_chart(fig, use_container_width=True)
     
     # Optimization history
     if st.session_state.optimization_history:
@@ -753,6 +754,22 @@ def contour_plots_section():
 
 def create_contour_plot(samples_df, var1_name, var2_name, obj_name):
     """Create a contour plot for two variables and one objective"""
+    
+    # Check if we have enough data points
+    if len(samples_df) < 3:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Need at least 3 data points for contour plot",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False
+        )
+        fig.update_layout(
+            title=f"{obj_name} vs {var1_name} & {var2_name}",
+            xaxis_title=var1_name,
+            yaxis_title=var2_name,
+            height=400
+        )
+        return fig
     
     # Get data
     x = samples_df[var1_name].values
