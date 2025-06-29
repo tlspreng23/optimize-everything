@@ -8,6 +8,7 @@ import json
 import io
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+from scipy.interpolate import griddata
 import warnings
 import itertools
 warnings.filterwarnings('ignore')
@@ -22,10 +23,8 @@ try:
     from gpytorch.mlls import ExactMarginalLogLikelihood
     from botorch.utils.transforms import normalize, unnormalize
     BOTORCH_AVAILABLE = True
-    st.session_state.optimization_backend = "BoTorch"
 except ImportError:
     BOTORCH_AVAILABLE = False
-    st.session_state.optimization_backend = "Scikit-learn"
 
 # Page config
 st.set_page_config(
@@ -187,86 +186,6 @@ def calculate_hypervolume(points, reference_point):
             volume += contrib
         return volume
 
-def main():
-    # Header
-    st.markdown(f"""
-    <div class="main-header">
-        <h1>🎯 Optimize Everything</h1>
-        <p>Multi-variable Bayesian optimization powered by {st.session_state.optimization_backend}</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Sidebar for configuration
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        
-        # Variables section
-        st.subheader("🎛️ Variables")
-        with st.expander("Add Variables", expanded=len(st.session_state.variables) == 0):
-            var_name = st.text_input("Variable name", key="var_name")
-            col1, col2 = st.columns(2)
-            with col1:
-                var_min = st.number_input("Min value", key="var_min", format="%.4f", step=0.0001)
-            with col2:
-                var_max = st.number_input("Max value", key="var_max", format="%.4f", step=0.0001)
-            
-            if st.button("Add Variable"):
-                add_variable(var_name, var_min, var_max)
-        
-        # Display current variables
-        if st.session_state.variables:
-            st.write("**Current Variables:**")
-            for i, var in enumerate(st.session_state.variables):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.write(f"• {var['name']}: [{var['min']}, {var['max']}]")
-                with col2:
-                    if st.button("❌", key=f"del_var_{i}"):
-                        remove_variable(i)
-        
-        # Objectives section
-        st.subheader("🎯 Objectives")
-        with st.expander("Add Objectives", expanded=len(st.session_state.objectives) == 0):
-            obj_name = st.text_input("Objective name", key="obj_name")
-            obj_type = st.selectbox("Type", ["maximize", "minimize"], key="obj_type")
-            
-            if st.button("Add Objective"):
-                add_objective(obj_name, obj_type)
-        
-        # Display current objectives
-        if st.session_state.objectives:
-            st.write("**Current Objectives:**")
-            for i, obj in enumerate(st.session_state.objectives):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.write(f"• {obj['name']} ({obj['type']})")
-                with col2:
-                    if st.button("❌", key=f"del_obj_{i}"):
-                        remove_objective(i)
-    
-    # Main content
-    if not st.session_state.variables or not st.session_state.objectives:
-        st.warning("Please add at least one variable and one objective to get started!")
-        return
-    
-    # Tabs for different sections
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Data Input", "🎯 Optimization", "📈 Analysis", "🗺️ Contour Plots", "💾 Export/Import"])
-    
-    with tab1:
-        data_input_section()
-    
-    with tab2:
-        optimization_section()
-    
-    with tab3:
-        analysis_section()
-    
-    with tab4:
-        contour_plots_section()
-    
-    with tab5:
-        export_import_section()
-
 def add_variable(name, min_val, max_val):
     if not name:
         st.error("Please enter a variable name")
@@ -330,6 +249,14 @@ def remove_objective(index):
     # Remove from log scaling settings
     if removed_obj['name'] in st.session_state.log_scaling_settings['manual_obj_log_scale']:
         del st.session_state.log_scaling_settings['manual_obj_log_scale'][removed_obj['name']]
+    st.rerun()
+
+def add_sample(sample_data):
+    if st.session_state.samples.empty:
+        st.session_state.samples = pd.DataFrame([sample_data])
+    else:
+        st.session_state.samples = pd.concat([st.session_state.samples, pd.DataFrame([sample_data])], ignore_index=True)
+    st.success("Sample added successfully!")
     st.rerun()
 
 def data_input_section():
@@ -422,21 +349,15 @@ def data_input_section():
     else:
         st.info("No samples added yet. Add some data to get started with optimization!")
 
-def add_sample(sample_data):
-    if st.session_state.samples.empty:
-        st.session_state.samples = pd.DataFrame([sample_data])
-    else:
-        st.session_state.samples = pd.concat([st.session_state.samples, pd.DataFrame([sample_data])], ignore_index=True)
-    st.success("Sample added successfully!")
-    st.rerun()
-
 def optimization_section():
     st.header("🎯 Bayesian Optimization")
     
-    # Show backend info
+    # Set backend in session state
     if BOTORCH_AVAILABLE:
+        st.session_state.optimization_backend = "BoTorch"
         st.success("✅ Using BoTorch for advanced Bayesian optimization")
     else:
+        st.session_state.optimization_backend = "Scikit-learn"
         st.warning("⚠️ BoTorch not available. Using scikit-learn Gaussian Process (still very effective!)")
     
     if st.session_state.samples.empty:
@@ -808,3 +729,379 @@ def generate_sklearn_suggestions(samples_df, variables, objective_name, num_sugg
         suggestions.append(suggestion)
     
     return suggestions
+
+def format_suggestion(suggestion, variables):
+    """Format suggestion for display with 4 decimal places"""
+    var_strings = []
+    for var in variables:
+        value = suggestion[var['name']]
+        var_strings.append(f"<strong>{var['name']}:</strong> {value:.4f}")
+    return ", ".join(var_strings)
+
+def analysis_section():
+    st.header("📈 Analysis & Visualization")
+    
+    if st.session_state.samples.empty:
+        st.info("Add some sample data to see analysis!")
+        return
+    
+    # Summary statistics
+    st.subheader("📊 Summary Statistics")
+    st.dataframe(st.session_state.samples.describe(), use_container_width=True)
+    
+    # Correlation matrix
+    if len(st.session_state.samples.columns) > 1:
+        st.subheader("🔗 Correlation Matrix")
+        corr_matrix = st.session_state.samples.corr()
+        fig = px.imshow(corr_matrix, text_auto=True, aspect="auto", 
+                       title="Variable & Objective Correlations")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Objective trends
+    if len(st.session_state.objectives) > 0 and len(st.session_state.samples) > 0:
+        st.subheader("📈 Objective Trends")
+        obj_cols = st.columns(len(st.session_state.objectives))
+        
+        for i, obj in enumerate(st.session_state.objectives):
+            with obj_cols[i]:
+                if obj['name'] in st.session_state.samples.columns:
+                    fig = px.line(y=st.session_state.samples[obj['name']], 
+                                 title=f"{obj['name']} Over Time",
+                                 labels={'index': 'Experiment #', 'y': obj['name']})
+                    fig.add_scatter(y=st.session_state.samples[obj['name']], mode='markers')
+                    st.plotly_chart(fig, use_container_width=True)
+    
+    # Multi-objective analysis
+    if len(st.session_state.objectives) > 1:
+        st.subheader("🎯 Multi-Objective Analysis")
+        
+        # Pareto front visualization
+        if len(st.session_state.objectives) == 2:
+            obj1, obj2 = st.session_state.objectives[0], st.session_state.objectives[1]
+            x_vals = st.session_state.samples[obj1['name']].values
+            y_vals = st.session_state.samples[obj2['name']].values
+            
+            # Calculate Pareto front
+            objectives_for_pareto = np.column_stack([
+                x_vals if obj1['type'] == 'maximize' else -x_vals,
+                y_vals if obj2['type'] == 'maximize' else -y_vals
+            ])
+            pareto_mask = pareto_front(objectives_for_pareto)
+            
+            fig = go.Figure()
+            
+            # Non-Pareto points
+            fig.add_trace(go.Scatter(
+                x=x_vals[~pareto_mask],
+                y=y_vals[~pareto_mask],
+                mode='markers',
+                name='Non-Pareto Points',
+                marker=dict(color='lightblue', size=8)
+            ))
+            
+            # Pareto points
+            fig.add_trace(go.Scatter(
+                x=x_vals[pareto_mask],
+                y=y_vals[pareto_mask],
+                mode='markers',
+                name='Pareto Front',
+                marker=dict(color='red', size=12, symbol='star')
+            ))
+            
+            fig.update_layout(
+                title=f"Pareto Front: {obj1['name']} vs {obj2['name']}",
+                xaxis_title=f"{obj1['name']} ({'maximize' if obj1['type'] == 'maximize' else 'minimize'})",
+                yaxis_title=f"{obj2['name']} ({'maximize' if obj2['type'] == 'maximize' else 'minimize'})"
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show Pareto optimal points
+            if np.any(pareto_mask):
+                st.write("**Pareto Optimal Points:**")
+                pareto_samples = st.session_state.samples[pareto_mask]
+                st.dataframe(pareto_samples, use_container_width=True)
+    
+    # Optimization history
+    if st.session_state.optimization_history:
+        st.subheader("🕒 Optimization History")
+        history_df = pd.DataFrame([
+            {
+                'Timestamp': hist['timestamp'],
+                'Objective/Mode': f"{hist['objective']} ({hist.get('optimization_mode', 'Single')})",
+                'Samples Used': hist['num_samples'],
+                'Suggestions Generated': len(hist['suggestions']),
+                'Backend': hist.get('backend', 'Unknown')
+            }
+            for hist in st.session_state.optimization_history
+        ])
+        st.dataframe(history_df, use_container_width=True)
+
+def contour_plots_section():
+    st.header("🗺️ Contour Plots")
+    
+    if st.session_state.samples.empty:
+        st.info("Add some sample data to see contour plots!")
+        return
+    
+    if len(st.session_state.variables) < 2:
+        st.info("Need at least 2 variables to create contour plots!")
+        return
+    
+    if len(st.session_state.objectives) == 0:
+        st.info("Need at least 1 objective to create contour plots!")
+        return
+    
+    # Get all variable combinations
+    var_combinations = list(itertools.combinations(st.session_state.variables, 2))
+    
+    if len(var_combinations) == 0:
+        st.info("Need at least 2 variables for contour plots!")
+        return
+    
+    # Select objective for contour plotting
+    selected_objective = st.selectbox(
+        "Select objective for contour plots:",
+        [obj['name'] for obj in st.session_state.objectives]
+    )
+    
+    # Create contour plots for each variable combination
+    n_plots = len(var_combinations)
+    n_cols = min(2, n_plots)
+    n_rows = (n_plots + n_cols - 1) // n_cols
+    
+    for i, (var1, var2) in enumerate(var_combinations):
+        if i % n_cols == 0:
+            cols = st.columns(n_cols)
+        
+        with cols[i % n_cols]:
+            fig = create_contour_plot(
+                st.session_state.samples,
+                var1['name'], var2['name'], selected_objective
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+def create_contour_plot(samples_df, var1_name, var2_name, obj_name):
+    """Create a contour plot for two variables and one objective"""
+    
+    # Check if we have enough data points
+    if len(samples_df) < 3:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Need at least 3 data points for contour plot",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False
+        )
+        fig.update_layout(
+            title=f"{obj_name} vs {var1_name} & {var2_name}",
+            xaxis_title=var1_name,
+            yaxis_title=var2_name,
+            height=400
+        )
+        return fig
+    
+    # Get data
+    x = samples_df[var1_name].values
+    y = samples_df[var2_name].values
+    z = samples_df[obj_name].values
+    
+    # Create interpolation grid
+    x_range = np.linspace(x.min(), x.max(), 50)
+    y_range = np.linspace(y.min(), y.max(), 50)
+    X_grid, Y_grid = np.meshgrid(x_range, y_range)
+    
+    # Interpolate values for contour
+    Z_grid = griddata((x, y), z, (X_grid, Y_grid), method='cubic', fill_value=z.mean())
+    
+    # Create contour plot
+    fig = go.Figure()
+    
+    # Add contour
+    fig.add_trace(go.Contour(
+        x=x_range,
+        y=y_range,
+        z=Z_grid,
+        colorscale='Viridis',
+        name=obj_name,
+        contours=dict(
+            showlabels=True,
+            labelfont=dict(size=10, color='white')
+        ),
+        colorbar=dict(title=obj_name)
+    ))
+    
+    # Add sample points
+    fig.add_trace(go.Scatter(
+        x=x,
+        y=y,
+        mode='markers',
+        marker=dict(
+            size=8,
+            color=z,
+            colorscale='Viridis',
+            line=dict(width=2, color='white'),
+            showscale=False
+        ),
+        text=[f"{obj_name}: {val:.3f}" for val in z],
+        hovertemplate=f"{var1_name}: %{{x:.3f}}<br>{var2_name}: %{{y:.3f}}<br>%{{text}}<extra></extra>",
+        name="Samples"
+    ))
+    
+    fig.update_layout(
+        title=f"{obj_name} vs {var1_name} & {var2_name}",
+        xaxis_title=var1_name,
+        yaxis_title=var2_name,
+        height=400
+    )
+    
+    return fig
+
+def export_import_section():
+    st.header("💾 Export & Import")
+    
+    # Export section
+    st.subheader("📤 Export Data")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if not st.session_state.samples.empty:
+            csv_data = st.session_state.samples.to_csv(index=False)
+            st.download_button(
+                label="Download Samples as CSV",
+                data=csv_data,
+                file_name="optimization_samples.csv",
+                mime="text/csv"
+            )
+    
+    with col2:
+        # Export complete configuration
+        config_data = {
+            'variables': st.session_state.variables,
+            'objectives': st.session_state.objectives,
+            'samples': st.session_state.samples.to_dict('records') if not st.session_state.samples.empty else [],
+            'history': st.session_state.optimization_history,
+            'log_scaling_settings': st.session_state.log_scaling_settings
+        }
+        
+        config_json = json.dumps(config_data, indent=2, default=str)
+        st.download_button(
+            label="Download Complete Configuration",
+            data=config_json,
+            file_name="optimization_config.json",
+            mime="application/json"
+        )
+    
+    # Import section
+    st.subheader("📥 Import Configuration")
+    
+    uploaded_config = st.file_uploader("Upload Configuration JSON", type="json")
+    if uploaded_config is not None:
+        try:
+            config_data = json.load(uploaded_config)
+            
+            if st.button("Load Configuration"):
+                st.session_state.variables = config_data.get('variables', [])
+                st.session_state.objectives = config_data.get('objectives', [])
+                
+                if config_data.get('samples'):
+                    st.session_state.samples = pd.DataFrame(config_data['samples'])
+                else:
+                    st.session_state.samples = pd.DataFrame()
+                
+                st.session_state.optimization_history = config_data.get('history', [])
+                st.session_state.log_scaling_settings = config_data.get('log_scaling_settings', {
+                    'auto_log_scale': True,
+                    'manual_var_log_scale': {},
+                    'manual_obj_log_scale': {}
+                })
+                
+                st.success("Configuration loaded successfully!")
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"Error loading configuration: {str(e)}")
+
+def main():
+    # Header
+    backend_name = "BoTorch" if BOTORCH_AVAILABLE else "Scikit-learn"
+    st.markdown(f"""
+    <div class="main-header">
+        <h1>🎯 Optimize Everything</h1>
+        <p>Multi-variable Bayesian optimization powered by {backend_name}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar for configuration
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # Variables section
+        st.subheader("🎛️ Variables")
+        with st.expander("Add Variables", expanded=len(st.session_state.variables) == 0):
+            var_name = st.text_input("Variable name", key="var_name")
+            col1, col2 = st.columns(2)
+            with col1:
+                var_min = st.number_input("Min value", key="var_min", format="%.4f", step=0.0001)
+            with col2:
+                var_max = st.number_input("Max value", key="var_max", format="%.4f", step=0.0001)
+            
+            if st.button("Add Variable"):
+                add_variable(var_name, var_min, var_max)
+        
+        # Display current variables
+        if st.session_state.variables:
+            st.write("**Current Variables:**")
+            for i, var in enumerate(st.session_state.variables):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"• {var['name']}: [{var['min']}, {var['max']}]")
+                with col2:
+                    if st.button("❌", key=f"del_var_{i}"):
+                        remove_variable(i)
+        
+        # Objectives section
+        st.subheader("🎯 Objectives")
+        with st.expander("Add Objectives", expanded=len(st.session_state.objectives) == 0):
+            obj_name = st.text_input("Objective name", key="obj_name")
+            obj_type = st.selectbox("Type", ["maximize", "minimize"], key="obj_type")
+            
+            if st.button("Add Objective"):
+                add_objective(obj_name, obj_type)
+        
+        # Display current objectives
+        if st.session_state.objectives:
+            st.write("**Current Objectives:**")
+            for i, obj in enumerate(st.session_state.objectives):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"• {obj['name']} ({obj['type']})")
+                with col2:
+                    if st.button("❌", key=f"del_obj_{i}"):
+                        remove_objective(i)
+    
+    # Main content
+    if not st.session_state.variables or not st.session_state.objectives:
+        st.warning("Please add at least one variable and one objective to get started!")
+        return
+    
+    # Tabs for different sections
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Data Input", "🎯 Optimization", "📈 Analysis", "🗺️ Contour Plots", "💾 Export/Import"])
+    
+    with tab1:
+        data_input_section()
+    
+    with tab2:
+        optimization_section()
+    
+    with tab3:
+        analysis_section()
+    
+    with tab4:
+        contour_plots_section()
+    
+    with tab5:
+        export_import_section()
+
+if __name__ == "__main__":
+    main()
